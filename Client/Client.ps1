@@ -162,6 +162,28 @@ function Discover-HostOnLan {
         [int]$TimeoutSeconds = 4
     )
 
+    # 1. Rapid check for Host Server on local machine (same PC test mode)
+    try {
+        $localProbe = "http://127.0.0.1:8765/api/v1/health"
+        $req = [System.Net.HttpWebRequest]::Create($localProbe)
+        $req.Timeout = 500
+        $req.Method = "GET"
+        $resp = $req.GetResponse()
+        $sr = New-Object System.IO.StreamReader($resp.GetResponseStream(), [System.Text.Encoding]::UTF8)
+        $txt = $sr.ReadToEnd()
+        $sr.Close(); $resp.Close()
+        $healthJson = $txt | ConvertFrom-Json
+        if ($healthJson -and $healthJson.service -eq "LAN-Dynamic-Wallpaper-Host") {
+            Write-ClientLog "Discovered Host Server on local PC at 127.0.0.1:8765" -Level INFO
+            return [PSCustomObject]@{
+                service  = "LAN_WALLPAPER_HOST"
+                hostname = if ($healthJson.PSObject.Properties["hostname"]) { $healthJson.hostname } else { "localhost" }
+                ip       = "127.0.0.1"
+                port     = 8765
+            }
+        }
+    } catch {}
+
     Write-ClientLog "Initiating LAN UDP host discovery on port $DiscoveryPort..." -Level INFO
     $udp = New-Object System.Net.Sockets.UdpClient
     $udp.EnableBroadcast = $true
@@ -655,6 +677,22 @@ function Start-ClientAgent {
             $hostPort = $disc.port
             $cfg.Connection.HostAddress = $hostIp
             Save-ClientConfig -Path $ConfigPath -ConfigObj $cfg
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($hostIp) -and [Environment]::UserInteractive -and -not $RunOnce) {
+        Write-Host ""
+        Write-Host "==============================================================================" -ForegroundColor Yellow
+        Write-Host "  [NOTICE] Host PC could not be detected automatically on your LAN." -ForegroundColor Yellow
+        Write-Host "  (This is common when Wi-Fi routers block UDP broadcast packets)." -ForegroundColor Gray
+        Write-Host "  Look at the green Host console window for its IP address (e.g. 192.168.1.15)." -ForegroundColor White
+        Write-Host "==============================================================================" -ForegroundColor Yellow
+        $userIp = Read-Host "  Enter Host PC IP address (or press Enter for offline mode)"
+        if (-not [string]::IsNullOrWhiteSpace($userIp)) {
+            $hostIp = $userIp.Trim().Replace("http://", "").Replace("https://", "").Replace(":8765", "").TrimEnd("/")
+            $cfg.Connection.HostAddress = $hostIp
+            Save-ClientConfig -Path $ConfigPath -ConfigObj $cfg
+            Write-ClientLog "Configured Host IP: $hostIp (saved to ClientConfig.json)" -Level INFO
         }
     }
 
