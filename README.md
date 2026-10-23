@@ -24,34 +24,44 @@ Step 1 (Host PC)                      Step 2 (Upload Photos)                 Ste
 
 ---
 
-### 🖥️ Step 1: On the Host PC (The Administrator Computer)
-
-1. Double-click **`1-Start-Host.bat`** (located right in your outer folder).
-2. A green console window appears showing your Host PC's active IP address (e.g. `192.168.31.20`).
-3. **The `Wallpapers/` folder will automatically pop open** on your screen in Windows Explorer!
-4. **Drop your photos or videos** into this `Wallpapers/` folder:
-   - Supported formats: **JPG, PNG, BMP, GIF, WEBP, HEIC (iPhone photos), MP4/MOV videos**.
-5. The Host immediately sets its own desktop wallpaper and rotates through all images every **5 seconds**!
+### 🖥️ Step 1: On the Host PC
+1. Double-click **`1-Start-Host.bat`**.
+   - **No Administrator Privileges Required**: Runs directly under your normal Windows user account.
+   - Starts pure WinSock TCP HTTP server on port `8765` and UDP discovery on port `8766`.
+2. A green console window appears showing your Host PC's active IP address (e.g. `172.16.20.169` or `192.168.1.50`).
+3. **The `Wallpapers/` folder automatically pops open** on your screen in Windows Explorer!
+4. **Drop your photos** into this `Wallpapers/` folder:
+   - Supported formats: **JPG, JPEG, PNG, BMP, GIF, WEBP, JFIF, HEIC, MP4/MOV videos**.
+5. The Host rotates through all images every **5 seconds**, synchronized down to the exact second with all clients!
 6. **Keep `1-Start-Host.bat` open** (you can minimize it).
 
 ---
 
 ### 💻 Step 2: On Client PCs (All 30–100 Lab/Office Computers)
+Choose whichever option is most convenient:
 
-1. Copy the folder to the client computer (via USB drive or LAN network share).
-2. Double-click **`2-Start-Client.bat`**.
-3. **That's all!**
-   - You do **NOT** need administrator privileges on client machines.
-   - You do **NOT** need to type or configure the Host's IP address.
-   - The client automatically scans the LAN, finds the Host PC, downloads all photos, and starts rotating the desktop wallpaper every **5 seconds**!
+- **Option A (Double-Click Batch File)**:
+  Copy the folder or share it over LAN, and double-click **`2-Start-Client.bat`** (or run `2-Start-Client.bat <HOST_IP>`).
+- **Option B (1-Line Instant Connect - Zero File Copying)**:
+  Press `Win + R` on the client PC, paste the command, and press Enter:
+  ```powershell
+  powershell -WindowStyle Hidden -ExecutionPolicy Bypass -Command "irm http://<HOST_IP>:8765/setup | iex"
+  ```
+  *(Replace `<HOST_IP>` with your Host PC's IP address shown in green on the Host console).*
+
+**That's all!**
+- **Zero Admin**: Operates entirely under standard user sessions.
+- **Zero Manual Setup**: Automatically discovers the Host PC, syncs wallpapers, and applies the desktop wallpaper.
+- **Auto-Starts on Reboot**: Auto-registers in Windows user logon (`HKCU Run`) so client PCs stay synced automatically on every restart!
+- **Strictly Windows Desktop Wallpaper**: Changes the actual Windows desktop background using native Win32 APIs (never opens a browser).
 
 ---
 
 ### 🧪 Step 3: Run Diagnostics & Automated Tests (Optional)
 
-- Double-click **`3-Test-System.bat`** (inside `LAN-Dynamic-Wallpaper\`) to run the automated test harness:
+- Double-click **`3-Test-System.bat`** to run the enterprise verification harness:
   - Validates image conversion & SHA-256 hashes.
-  - Tests 100-client concurrent load simulation (400 requests in 0.86 seconds).
+  - Tests 100-client concurrent load simulation.
   - Confirms 100% system health.
 
 ---
@@ -60,8 +70,8 @@ Step 1 (Host PC)                      Step 2 (Upload Photos)                 Ste
 
 | What You Want to Do | How to Do It in 1 Step |
 | :--- | :--- |
-| **Add a new photo** | Just drop the photo file into `Wallpapers/` on the Host PC. Within 10 seconds, all client computers will automatically start showing it! |
-| **Remove a photo** | Delete the file from `Wallpapers/` on the Host PC. All client computers immediately stop showing it. |
+| **Add a new photo dynamically** | Drop the photo into `Wallpapers/` on the Host PC. **Without restarting the server**, the Host detects it within 1 second and all client computers sync and show it! |
+| **Remove a photo dynamically** | Delete the file from `Wallpapers/` on the Host PC. It is instantly removed from rotation across the entire network. |
 | **Change the 5-second timer** | Open `Host\HostConfig.json` in Notepad, change `"DefaultIntervalSeconds": 5` to any number you want (e.g. `10` or `30`), and save. |
 | **Check connected clients** | Run `powershell -File Tools\Deployment-Report.ps1` to view live client workstations. |
 
