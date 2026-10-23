@@ -607,20 +607,10 @@ function Start-ClientAgent {
                 }
             } catch {}
         }
-        elseif ([Environment]::UserInteractive -and -not $RunOnce) {
-            Write-Host ""
-            Write-Host "==============================================================================" -ForegroundColor Yellow
-            Write-Host "  CLIENT AUTHENTICATION SETUP" -ForegroundColor Yellow
-            Write-Host "==============================================================================" -ForegroundColor Yellow
-            Write-Host "  Enter the Client Auth Secret from your Host PC console or HostConfig.json" -ForegroundColor White
-            Write-Host "  (If your Host has RequireAuthentication=false, you may simply press Enter):" -ForegroundColor Gray
-            $userKey = Read-Host "  Auth Secret"
-            if (-not [string]::IsNullOrWhiteSpace($userKey)) {
-                $authSecret = $userKey.Trim()
-                $cfg.Security.AuthSecret = $authSecret
-                Save-ClientConfig -Path $Path -ConfigObj $cfg
-                Write-ClientLog "Saved AuthSecret to ClientConfig.json." -Level INFO
-            }
+        else {
+            # Zero-Prompt Mode: Connect seamlessly without asking for passwords
+            $authSecret = ""
+            $cfg.Security.AuthSecret = ""
         }
     }
 

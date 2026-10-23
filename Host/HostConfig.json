@@ -11,7 +11,7 @@
                      "_comment_secrets":  "AuthSecret and AdminSecret will be auto-generated cryptographically on first run or installation if left blank",
                      "AuthSecret":  "",
                      "AdminSecret":  "",
-                     "RequireAuthentication":  true,
+                     "RequireAuthentication":  false,
                      "MaxImageSizeBytes":  104857600,
                      "MaxPhotosCapacity":  10000,
                      "AllowedExtensions":  [
