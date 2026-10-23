@@ -379,8 +379,10 @@ function Sync-WallpaperCollection {
             }
         }
 
-        # Retrieve source files deterministically
-        $allFiles = Get-ChildItem -LiteralPath $SourceDir -File | Sort-Object -Property Name
+        # Retrieve source files deterministically (excluding metadata and temp files)
+        $allFiles = Get-ChildItem -LiteralPath $SourceDir -File |
+            Where-Object { $_.Name -ne "manifest.json" -and -not $_.Name.EndsWith(".pubtmp") -and -not $_.Name.EndsWith(".tmp") } |
+            Sort-Object -Property Name
         $validImages = New-Object System.Collections.Generic.List[PSCustomObject]
         $totalBytes = 0
 

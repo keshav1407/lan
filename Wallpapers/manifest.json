@@ -1,7 +1,7 @@
 ﻿{
     "protocolVersion":  "1.0",
-    "collectionVersion":  "v20261022215935_3f8a5925",
-    "timestamp":  "2026-10-22T21:59:35.9628975Z",
+    "collectionVersion":  "v20261023083101_4a6f3c3d",
+    "timestamp":  "2026-10-23T08:31:01.1797519Z",
     "slideshowInterval":  5,
     "totalImages":  3,
     "totalBytes":  4328772,
@@ -11,7 +11,7 @@
                        "hash":  "2050a6cecab2e3162e444fb5cab349995221b6e65c605b418d368cb85da4c524",
                        "size":  311905,
                        "extension":  ".jpg",
-                       "modified":  "2026-10-22T20:48:49.3471557Z",
+                       "modified":  "2026-10-23T06:11:52.0883271Z",
                        "downloadUrl":  "/api/v1/wallpaper/IMG-20260218-WA0011.jpg"
                    },
                    {
@@ -19,7 +19,7 @@
                        "hash":  "392ca5d717df1ce39f49eb1a9b9d4cf58c0168c12f364fe9e2ad4eeecf9c2011",
                        "size":  1666637,
                        "extension":  ".png",
-                       "modified":  "2026-10-22T21:51:15.3325784Z",
+                       "modified":  "2026-10-23T06:11:52.1141368Z",
                        "downloadUrl":  "/api/v1/wallpaper/it%20logo.png"
                    },
                    {
@@ -27,7 +27,7 @@
                        "hash":  "8ab704f60139971c1827ce846d7d158812c605e74bd339487be0921a3fce8ff8",
                        "size":  2350230,
                        "extension":  ".png",
-                       "modified":  "2026-10-22T21:58:56.7304019Z",
+                       "modified":  "2026-10-23T06:11:52.1471342Z",
                        "downloadUrl":  "/api/v1/wallpaper/VSB%20Engineering%20College%20IT%20Banner.png"
                    }
                ]

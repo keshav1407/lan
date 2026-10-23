@@ -603,9 +603,43 @@ function Start-HostServer {
 
     & $refreshHostSlideshow
 
+    $lastWallpaperCheck = [DateTime]::MinValue
+    $initFiles = Get-ChildItem -LiteralPath $wallpapersDir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne "manifest.json" -and -not $_.Name.EndsWith(".pubtmp") -and -not $_.Name.EndsWith(".tmp") }
+    $lastFolderFingerprint = ($initFiles | ForEach-Object { "$($_.Name):$($_.Length):$($_.LastWriteTimeUtc.Ticks)" }) -join "|"
+
     try {
         while ($script:Running) {
-            # Synchronized exact-slot rotation for Host desktop
+            $now = [DateTime]::UtcNow
+
+            # ------------------------------------------------------------------
+            # 1. Dynamic Real-Time Folder Monitoring (Detect New/Deleted Photos)
+            # ------------------------------------------------------------------
+            if (($now - $lastWallpaperCheck).TotalSeconds -ge 1.5) {
+                $lastWallpaperCheck = $now
+                try {
+                    $currFiles = Get-ChildItem -LiteralPath $wallpapersDir -File -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Name -ne "manifest.json" -and -not $_.Name.EndsWith(".pubtmp") -and -not $_.Name.EndsWith(".tmp") }
+                    $currFingerprint = ($currFiles | ForEach-Object { "$($_.Name):$($_.Length):$($_.LastWriteTimeUtc.Ticks)" }) -join "|"
+
+                    if ($currFingerprint -ne $lastFolderFingerprint) {
+                        $lastFolderFingerprint = $currFingerprint
+                        Write-HostLog "Change detected in Wallpapers folder! Syncing dynamically..." -Level AUDIT
+                        $syncRes = Sync-WallpaperCollection -SourceDir $wallpapersDir -TargetDir $publishedDir `
+                            -MaxSizeBytes $maxImageBytes -AllowedExts $allowedExts -SlideshowInterval $defaultInterval
+                        
+                        & $refreshHostSlideshow
+                        $imgCount = if ($null -ne $syncRes) { $syncRes.totalImages } else { $localImageFiles.Count }
+                        Write-HostLog "Wallpapers updated dynamically: $imgCount images active on LAN" -Level AUDIT
+                    }
+                } catch {
+                    Write-HostLog "Dynamic sync warning: $($_.Exception.Message)" -Level WARN
+                }
+            }
+
+            # ------------------------------------------------------------------
+            # 2. Synchronized Exact-Slot Rotation for Host Desktop
+            # ------------------------------------------------------------------
             if (-not $NoLocalSlideshow -and ([System.Management.Automation.PSTypeName]'Win32WallpaperEngine').Type) {
                 try {
                     & $refreshHostSlideshow

@@ -5,7 +5,7 @@
     "DiscoveryPort": 8766,
     "EnableDiscovery": true,
     "DiscoveryTimeoutSeconds": 4,
-    "PollIntervalSeconds": 5,
+    "PollIntervalSeconds": 3,
     "MaxBackoffSeconds": 30,
     "RequestTimeoutSeconds": 15
   },
