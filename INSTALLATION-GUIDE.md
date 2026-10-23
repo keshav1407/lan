@@ -23,23 +23,23 @@ This guide details the complete deployment lifecycle for the LAN Dynamic Wallpap
 
 ---
 
-## ⚡ Quick Run Architecture (The Core Batch Files)
+## ⚡ Quick Run Architecture (Zero Administrator Required)
 
-The system is streamlined into self-contained launchers that handle setup and execution automatically:
+The system is streamlined into self-contained launchers that handle setup and execution completely automatically without requiring administrator rights:
 
 1. **On Host PC**: Double-click **`1-Start-Host.bat`**
-   - Automatically checks for Administrator elevation and self-elevates if needed.
-   - Configures Windows Firewall rules (`TCP 8765`, `UDP 8766`).
-   - Idempotently reserves HTTP.sys URL ACL (`http://+:8765/`).
+   - Runs instantly under standard user session (NO "Run as Administrator" needed).
+   - Starts pure-socket TCP HTTP server on port `8765` and UDP Discovery on `8766`.
    - Opens the `Wallpapers/` drop folder in Windows Explorer.
-   - Publishes valid images, generates `manifest.json`, and begins both the host slideshow and the network service.
+   - Synchronously rotates Host desktop wallpaper in unison with all client PCs.
 
-2. **On Client PCs**: Double-click **`2-Start-Client.bat`**
-   - Operates entirely under the standard interactive user desktop session (zero admin required).
-   - Automatically scans the LAN for the Host PC via UDP broadcast and fast subnet sweep.
-   - Prompts for `AuthSecret` on initial run if not already stored in `ClientConfig.json`.
-   - Downloads wallpaper images into local `Cache/` and immediately applies the desktop wallpaper.
-   - Registers seamless background startup at user logon in `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`.
+2. **On Client PCs**: Connect via either option (Zero manual setup):
+   - **Option A (Batch File)**: Double-click **`2-Start-Client.bat`**.
+   - **Option B (1-Line Command)**: Open PowerShell on any client PC and run:
+     `irm http://<HOST_IP>:8765/setup | iex`
+   - Client automatically discovers Host on LAN via UDP and subnet sweep.
+   - Downloads all wallpapers and synchronizes the desktop background at the EXACT SAME SECOND as Host.
+   - Automatically registers in user startup (`HKCU Run`) so it persists on future reboots.
 
 3. **Automated Verification**: Double-click **`3-Test-System.bat`**
    - Executes all 5 enterprise verification suites (57 automated tests + 100-client load benchmark).

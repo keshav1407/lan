@@ -173,3 +173,67 @@ function Step-WallpaperRotation {
 
     return $null
 }
+
+function Step-SynchronizedWallpaperRotation {
+    <#
+    .SYNOPSIS
+    Applies the wallpaper corresponding to the current global synchronized time slot.
+    Ensures that Host and all Client nodes display the exact same image at the exact same second.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.List[string]]$ImageFiles,
+
+        [Parameter(Mandatory = $false)]
+        [int]$IntervalSeconds = 5,
+
+        [Parameter(Mandatory = $false)]
+        [double]$ClockOffsetSeconds = 0.0,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$LastAppliedSlot,
+
+        [Parameter(Mandatory = $false)]
+        [ref]$CurrentIndex = $null
+    )
+
+    if ($null -eq $ImageFiles -or $ImageFiles.Count -eq 0) {
+        return $null
+    }
+
+    if ($IntervalSeconds -le 0) { $IntervalSeconds = 5 }
+
+    # Universal synchronized Unix epoch timestamp
+    $currentUnixSec = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + $ClockOffsetSeconds
+    $currentSlot = [int64][Math]::Floor($currentUnixSec / $IntervalSeconds)
+
+    # If we already applied the wallpaper for this time slot, skip
+    if ($LastAppliedSlot.Value -eq $currentSlot) {
+        return $null
+    }
+
+    $count = $ImageFiles.Count
+    $targetIndex = [int]($currentSlot % $count)
+    if ($targetIndex -lt 0) { $targetIndex = ($targetIndex + $count) % $count }
+
+    if ($null -ne $CurrentIndex) {
+        $CurrentIndex.Value = $targetIndex
+    }
+
+    $selectedPath = $ImageFiles[$targetIndex]
+    if (Test-Path -LiteralPath $selectedPath) {
+        $applied = Set-DesktopWallpaper -ImagePath $selectedPath
+        if ($applied) {
+            $LastAppliedSlot.Value = $currentSlot
+            return [PSCustomObject]@{
+                Path  = $selectedPath
+                Index = $targetIndex
+                Slot  = $currentSlot
+            }
+        }
+    }
+
+    return $null
+}
+

@@ -1,7 +1,7 @@
 # ==============================================================================
 # Host/Host.ps1
 # LAN Dynamic Wallpaper - Central Management Server & UDP Discovery Daemon
-# Pure Windows PowerShell 5.1+ / .NET - Role-Based Access Control Architecture
+# Pure Windows PowerShell 5.1+ / .NET - Zero-Admin Architecture (No UAC / Elevation Required)
 # ==============================================================================
 
 [CmdletBinding()]
@@ -30,7 +30,7 @@ if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
 }
 $script:ConfigPath = [System.IO.Path]::GetFullPath($ConfigPath.Trim().Trim('"').Trim("'"))
 
-# Ensure security protocol supports modern TLS if needed
+# Ensure TLS 1.2
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]'Tls12'
 
 # Import Publisher engine
@@ -48,31 +48,333 @@ $wallpaperScript = Join-Path $scriptDir "../Client/Wallpaper.ps1"
 if (Test-Path -LiteralPath $wallpaperScript) {
     try {
         . $wallpaperScript
-    } catch {
-        # Desktop wallpaper engine can be safely ignored in non-interactive sessions
+    } catch {}
+}
+
+# Compile Zero-Admin C# TCP HTTP Server (Runs without Administrator rights or http.sys URL ACLs)
+if (-not ([System.Management.Automation.PSTypeName]'LanHttpServer').Type) {
+    Add-Type -TypeDefinition @"
+    using System;
+    using System.IO;
+    using System.Net;
+    using System.Net.Sockets;
+    using System.Text;
+    using System.Threading;
+    using System.Collections.Concurrent;
+
+    public class ClientTelemetry {
+        public string ClientId;
+        public string Hostname;
+        public string IpAddress;
+        public string MacAddress;
+        public string ClientVersion;
+        public DateTime RegisteredAt;
+        public DateTime LastSeenAt;
+        public string Status;
+        public string CurrentHash;
     }
+
+    public class LanHttpServer {
+        private TcpListener _listener;
+        private volatile bool _running;
+        private string _publishedDir;
+        private string _scriptDir;
+        public ConcurrentDictionary<string, ClientTelemetry> Clients = new ConcurrentDictionary<string, ClientTelemetry>();
+        public string HostIp = "0.0.0.0";
+        public int Port = 8765;
+        public int DefaultInterval = 5;
+        public DateTime StartTime = DateTime.UtcNow;
+
+        public void Start(int port, string publishedDir, string scriptDir, string hostIp, int defaultInterval) {
+            Port = port;
+            _publishedDir = publishedDir;
+            _scriptDir = scriptDir;
+            HostIp = hostIp;
+            DefaultInterval = defaultInterval;
+            _listener = new TcpListener(IPAddress.Any, port);
+            _listener.Start(128);
+            _running = true;
+            ThreadPool.QueueUserWorkItem(ListenLoop);
+        }
+
+        public void Stop() {
+            _running = false;
+            try { _listener.Stop(); } catch {}
+        }
+
+        private void ListenLoop(object state) {
+            while (_running) {
+                try {
+                    TcpClient client = _listener.AcceptTcpClient();
+                    ThreadPool.QueueUserWorkItem(HandleClient, client);
+                } catch {
+                    if (!_running) break;
+                }
+            }
+        }
+
+        private void HandleClient(object state) {
+            using (TcpClient client = (TcpClient)state) {
+                try {
+                    client.ReceiveTimeout = 15000;
+                    client.SendTimeout = 15000;
+                    using (NetworkStream stream = client.GetStream()) {
+                        StreamReader reader = new StreamReader(stream, Encoding.UTF8);
+                        string reqLine = reader.ReadLine();
+                        if (string.IsNullOrEmpty(reqLine)) return;
+
+                        string[] parts = reqLine.Split(' ');
+                        if (parts.Length < 2) return;
+                        string method = parts[0].ToUpperInvariant();
+                        string fullPath = parts[1];
+                        string path = fullPath;
+                        int qIdx = path.IndexOf('?');
+                        if (qIdx >= 0) path = path.Substring(0, qIdx);
+
+                        // Read Headers
+                        int contentLength = 0;
+                        string line;
+                        while (!string.IsNullOrEmpty(line = reader.ReadLine())) {
+                            if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)) {
+                                int.TryParse(line.Substring(15).Trim(), out contentLength);
+                            }
+                        }
+
+                        // Read Body
+                        string body = "";
+                        if (contentLength > 0 && contentLength < 10485760) {
+                            char[] buf = new char[contentLength];
+                            int totalRead = 0;
+                            while (totalRead < contentLength) {
+                                int r = reader.Read(buf, totalRead, contentLength - totalRead);
+                                if (r <= 0) break;
+                                totalRead += r;
+                            }
+                            body = new string(buf, 0, totalRead);
+                        }
+
+                        string remoteIp = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
+
+                        // --------------------------------------------------
+                        // Route 1: GET /api/v1/health
+                        // --------------------------------------------------
+                        if (method == "GET" && path == "/api/v1/health") {
+                            string manifestPath = Path.Combine(_publishedDir, "manifest.json");
+                            string colVer = "none";
+                            int imgCount = 0;
+                            if (File.Exists(manifestPath)) {
+                                try {
+                                    string txt = File.ReadAllText(manifestPath, Encoding.UTF8);
+                                    int vIdx = txt.IndexOf("\"collectionVersion\":\"");
+                                    if (vIdx >= 0) {
+                                        int endV = txt.IndexOf('"', vIdx + 21);
+                                        if (endV > vIdx) colVer = txt.Substring(vIdx + 21, endV - (vIdx + 21));
+                                    }
+                                    int cIdx = txt.IndexOf("\"totalImages\":");
+                                    if (cIdx >= 0) {
+                                        int endC = txt.IndexOfAny(new char[] { ',', '}', '\r', '\n' }, cIdx + 14);
+                                        if (endC > cIdx) int.TryParse(txt.Substring(cIdx + 14, endC - (cIdx + 14)).Trim(), out imgCount);
+                                    }
+                                } catch {}
+                            }
+                            long uptime = (long)(DateTime.UtcNow - StartTime).TotalSeconds;
+                            string json = string.Format(
+                                "{{\"status\":\"ok\",\"service\":\"LAN-Dynamic-Wallpaper-Host\",\"version\":\"1.0.0\",\"uptimeSeconds\":{0},\"hostIp\":\"{1}\",\"collectionVersion\":\"{2}\",\"totalImages\":{3},\"registeredClients\":{4}}}",
+                                uptime, HostIp, colVer, imgCount, Clients.Count
+                            );
+                            SendJsonResponse(stream, 200, json);
+                            return;
+                        }
+
+                        // --------------------------------------------------
+                        // Route 2: GET /api/v1/manifest
+                        // --------------------------------------------------
+                        if (method == "GET" && path == "/api/v1/manifest") {
+                            string manifestPath = Path.Combine(_publishedDir, "manifest.json");
+                            if (File.Exists(manifestPath)) {
+                                byte[] raw = File.ReadAllBytes(manifestPath);
+                                SendBytesResponse(stream, 200, "application/json; charset=utf-8", raw);
+                            } else {
+                                SendJsonResponse(stream, 404, "{\"error\":\"Manifest not found\"}");
+                            }
+                            return;
+                        }
+
+                        // --------------------------------------------------
+                        // Route 3: GET /api/v1/wallpaper/{filename}
+                        // --------------------------------------------------
+                        if (method == "GET" && path.StartsWith("/api/v1/wallpaper/")) {
+                            string rawName = Uri.UnescapeDataString(path.Substring("/api/v1/wallpaper/".Length));
+                            string safeName = Path.GetFileName(rawName);
+                            string filePath = Path.Combine(_publishedDir, safeName);
+                            if (!File.Exists(filePath)) {
+                                SendJsonResponse(stream, 404, "{\"error\":\"File not found\"}");
+                                return;
+                            }
+
+                            string ext = Path.GetExtension(filePath).ToLowerInvariant();
+                            string mime = "application/octet-stream";
+                            if (ext == ".jpg" || ext == ".jpeg") mime = "image/jpeg";
+                            else if (ext == ".png") mime = "image/png";
+                            else if (ext == ".bmp") mime = "image/bmp";
+                            else if (ext == ".gif") mime = "image/gif";
+                            else if (ext == ".webp") mime = "image/webp";
+
+                            SendFileResponse(stream, filePath, mime);
+                            return;
+                        }
+
+                        // --------------------------------------------------
+                        // Route 4: POST /api/v1/auth/register
+                        // --------------------------------------------------
+                        if (method == "POST" && path == "/api/v1/auth/register") {
+                            string cid = "CLT-" + Guid.NewGuid().ToString("N").Substring(0, 12).ToUpperInvariant();
+                            string hostname = "PC-" + remoteIp;
+                            if (!string.IsNullOrEmpty(body)) {
+                                int hIdx = body.IndexOf("\"hostname\":\"");
+                                if (hIdx >= 0) {
+                                    int endH = body.IndexOf('"', hIdx + 12);
+                                    if (endH > hIdx) hostname = body.Substring(hIdx + 12, endH - (hIdx + 12));
+                                }
+                            }
+
+                            ClientTelemetry t = new ClientTelemetry {
+                                ClientId = cid,
+                                Hostname = hostname,
+                                IpAddress = remoteIp,
+                                RegisteredAt = DateTime.UtcNow,
+                                LastSeenAt = DateTime.UtcNow,
+                                Status = "ONLINE",
+                                CurrentHash = ""
+                            };
+                            Clients[cid] = t;
+
+                            string json = string.Format(
+                                "{{\"clientId\":\"{0}\",\"status\":\"ENROLLED\",\"slideshowInterval\":{1}}}",
+                                cid, DefaultInterval
+                            );
+                            SendJsonResponse(stream, 200, json);
+                            return;
+                        }
+
+                        // --------------------------------------------------
+                        // Route 5: POST /api/v1/heartbeat
+                        // --------------------------------------------------
+                        if (method == "POST" && path == "/api/v1/heartbeat") {
+                            if (!string.IsNullOrEmpty(body)) {
+                                string cid = "";
+                                int cIdx = body.IndexOf("\"clientId\":\"");
+                                if (cIdx >= 0) {
+                                    int endC = body.IndexOf('"', cIdx + 12);
+                                    if (endC > cIdx) cid = body.Substring(cIdx + 12, endC - (cIdx + 12));
+                                }
+                                if (!string.IsNullOrEmpty(cid) && Clients.ContainsKey(cid)) {
+                                    Clients[cid].LastSeenAt = DateTime.UtcNow;
+                                    Clients[cid].IpAddress = remoteIp;
+                                    Clients[cid].Status = "ONLINE";
+                                }
+                            }
+                            SendJsonResponse(stream, 200, "{\"status\":\"ACK\"}");
+                            return;
+                        }
+
+                        // --------------------------------------------------
+                        // Route 6: Automated Zero-Setup Client Deployment Scripts
+                        // --------------------------------------------------
+                        if (method == "GET" && (path == "/setup" || path == "/setup.ps1")) {
+                            string setupScript = GenerateClientSetupScript();
+                            byte[] raw = Encoding.UTF8.GetBytes(setupScript);
+                            SendBytesResponse(stream, 200, "text/plain; charset=utf-8", raw);
+                            return;
+                        }
+
+                        if (method == "GET" && (path == "/client.ps1" || path == "/client")) {
+                            string cScript = Path.Combine(_scriptDir, "../Client/Client.ps1");
+                            if (File.Exists(cScript)) {
+                                byte[] raw = File.ReadAllBytes(cScript);
+                                SendBytesResponse(stream, 200, "text/plain; charset=utf-8", raw);
+                                return;
+                            }
+                        }
+
+                        if (method == "GET" && path == "/Wallpaper.ps1") {
+                            string wScript = Path.Combine(_scriptDir, "../Client/Wallpaper.ps1");
+                            if (File.Exists(wScript)) {
+                                byte[] raw = File.ReadAllBytes(wScript);
+                                SendBytesResponse(stream, 200, "text/plain; charset=utf-8", raw);
+                                return;
+                            }
+                        }
+
+                        SendJsonResponse(stream, 404, "{\"error\":\"Endpoint not found\"}");
+                    }
+                } catch {}
+            }
+        }
+
+        private string GenerateClientSetupScript() {
+            return string.Format(
+                "# LAN Dynamic Wallpaper Client Automated Setup\r\n" +
+                "`$destDir = Join-Path `$env:LOCALAPPDATA 'LAN-Dynamic-Wallpaper'\r\n" +
+                "`$clientDir = Join-Path `$destDir 'Client'\r\n" +
+                "`$cacheDir = Join-Path `$destDir 'Cache'\r\n" +
+                "New-Item -ItemType Directory -Path `$clientDir -Force | Out-Null\r\n" +
+                "New-Item -ItemType Directory -Path `$cacheDir -Force | Out-Null\r\n" +
+                "Invoke-WebRequest -Uri 'http://{0}:{1}/client.ps1' -OutFile (Join-Path `$clientDir 'Client.ps1') -UseBasicParsing\r\n" +
+                "Invoke-WebRequest -Uri 'http://{0}:{1}/Wallpaper.ps1' -OutFile (Join-Path `$clientDir 'Wallpaper.ps1') -UseBasicParsing\r\n" +
+                "`$cfgJson = '@{{\"\"Connection\"\":{{\"\"HostAddress\"\":\"\"{0}\"\",\"\"HostPort\"\":{1},\"\"DiscoveryPort\"\":8766,\"\"EnableDiscovery\"\":true,\"\"PollIntervalSeconds\"\":4}},\"\"Slideshow\"\":{{\"\"IntervalSeconds\"\":{2}}}}}'\r\n" +
+                "Set-Content -Path (Join-Path `$clientDir 'ClientConfig.json') -Value `$cfgJson -Encoding UTF8\r\n" +
+                "Write-Host 'Client installed successfully. Launching background slideshow agent...' -ForegroundColor Green\r\n" +
+                "Start-Process powershell.exe -ArgumentList '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"' + (Join-Path `$clientDir 'Client.ps1') + '\"'\r\n",
+                HostIp, Port, DefaultInterval
+            );
+        }
+
+        private void SendJsonResponse(NetworkStream stream, int status, string json) {
+            byte[] body = Encoding.UTF8.GetBytes(json);
+            SendBytesResponse(stream, status, "application/json; charset=utf-8", body);
+        }
+
+        private void SendBytesResponse(NetworkStream stream, int status, string contentType, byte[] body) {
+            string statusText = (status == 200) ? "200 OK" : (status == 404 ? "404 Not Found" : status + " Status");
+            string header = string.Format(
+                "HTTP/1.1 {0}\r\nContent-Type: {1}\r\nContent-Length: {2}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                statusText, contentType, body.Length
+            );
+            byte[] hBytes = Encoding.UTF8.GetBytes(header);
+            stream.Write(hBytes, 0, hBytes.Length);
+            stream.Write(body, 0, body.Length);
+            stream.Flush();
+        }
+
+        private void SendFileResponse(NetworkStream stream, string filePath, string contentType) {
+            using (FileStream fs = File.OpenRead(filePath)) {
+                long len = fs.Length;
+                string header = string.Format(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {0}\r\nContent-Length: {1}\r\nCache-Control: public, max-age=86400\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                    contentType, len
+                );
+                byte[] hBytes = Encoding.UTF8.GetBytes(header);
+                stream.Write(hBytes, 0, hBytes.Length);
+                byte[] buf = new byte[65536];
+                int read;
+                while ((read = fs.Read(buf, 0, buf.Length)) > 0) {
+                    stream.Write(buf, 0, read);
+                }
+                stream.Flush();
+            }
+        }
+    }
+"@ -ErrorAction Stop
 }
 
 # Application State
 $script:Running = $true
 $script:StartTime = [DateTime]::UtcNow
-$script:HttpListener = $null
-$script:UdpListener = $null
+$script:Server = $null
 $script:HostMutex = $null
-$script:ClientRegistry = @{}
-$script:ClientLock = New-Object System.Object
 $script:LogLock = New-Object System.Object
 $script:LogDirectory = $null
-
-function New-CryptoSecret {
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    $bytes = New-Object byte[] 32
-    $rng.GetBytes($bytes)
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($b in $bytes) { [void]$sb.Append($b.ToString("x2")) }
-    return $sb.ToString()
-}
-
 
 function Write-HostLog {
     [CmdletBinding()]
@@ -87,7 +389,6 @@ function Write-HostLog {
     $timestamp = [DateTime]::UtcNow.ToString("yyyy-MM-dd HH:mm:ss.fff")
     $logLine = "[$timestamp] [$Level] [$ClientIp] $Message"
 
-    # Colorized Console output
     switch ($Level) {
         "INFO"  { Write-Host $logLine -ForegroundColor Gray }
         "AUDIT" { Write-Host $logLine -ForegroundColor Cyan }
@@ -96,7 +397,6 @@ function Write-HostLog {
         "DEBUG" { Write-Host $logLine -ForegroundColor DarkGray }
     }
 
-    # Daily Rotating File Log
     try {
         [System.Threading.Monitor]::Enter($script:LogLock)
         $logDir = if ($null -ne $script:LogDirectory -and -not [string]::IsNullOrWhiteSpace($script:LogDirectory)) {
@@ -110,101 +410,53 @@ function Write-HostLog {
         $logFile = Join-Path $logDir ("host-{0}.log" -f [DateTime]::UtcNow.ToString("yyyy-MM-dd"))
         [System.IO.File]::AppendAllText($logFile, "$logLine`r`n", [System.Text.Encoding]::UTF8)
     }
-    catch {
-        # Avoid crashing on logging I/O contention
-    }
+    catch {}
     finally {
         [System.Threading.Monitor]::Exit($script:LogLock)
     }
 }
 
-function Get-ActiveEthernetIp {
+function Get-ActiveLanIp {
     <#
     .SYNOPSIS
-    Discovers the active Ethernet IPv4 address, prioritizing wired Ethernet adapters.
+    Discovers the active LAN IPv4 address (Ethernet or Wi-Fi with active gateway).
     #>
     try {
+        # Check routing table for primary route to gateway
+        $defaultRoute = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
+            Sort-Object RouteMetric | Select-Object -First 1
+
+        if ($null -ne $defaultRoute) {
+            $ipObj = Get-NetIPAddress -InterfaceIndex $defaultRoute.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
+                Select-Object -First 1
+            if ($null -ne $ipObj) {
+                return $ipObj.IPAddress
+            }
+        }
+
+        # Fallback: scan all active physical IPv4 adapters
         $adapters = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
             Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" }
 
-        # Prioritize wired Ethernet or local adapter with a default gateway
         $preferred = $adapters | Where-Object {
             $alias = (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).InterfaceAlias
-            $alias -like "*Ethernet*" -or $alias -like "*vEthernet*" -or $alias -like "*LAN*"
+            $alias -like "*Ethernet*" -or $alias -like "*Wi-Fi*" -or $alias -like "*LAN*"
         } | Select-Object -First 1
 
         if ($null -ne $preferred) {
             return $preferred.IPAddress
         }
 
-        # Fallback to any valid non-loopback IPv4 with a default gateway
-        $fallback = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
-            ForEach-Object { Get-NetIPAddress -InterfaceIndex $_.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue } |
-            Where-Object { $_.IPAddress -notlike "127.*" } |
-            Select-Object -First 1
-
-        if ($null -ne $fallback) {
-            return $fallback.IPAddress
-        }
-
-        # Ultimate fallback
-        $anyIp = [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
-            Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and -not [System.Net.IPAddress]::IsLoopback($_) } |
-            Select-Object -First 1
-
-        if ($null -ne $anyIp) {
-            return $anyIp.IPAddressToString
+        if ($adapters.Count -gt 0) {
+            return $adapters[0].IPAddress
         }
     }
     catch {
-        Write-HostLog "Adapter detection error: $($_.Exception.Message)" -Level WARN
+        Write-HostLog "LAN adapter detection warning: $($_.Exception.Message)" -Level WARN
     }
 
     return "127.0.0.1"
-}
-
-function Load-ClientRegistry {
-    param([string]$Path)
-    [System.Threading.Monitor]::Enter($script:ClientLock)
-    try {
-        if (Test-Path -LiteralPath $Path) {
-            $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
-            $json = $raw | ConvertFrom-Json
-            $dict = @{}
-            if ($null -ne $json) {
-                foreach ($prop in $json.PSObject.Properties) {
-                    $dict[$prop.Name] = $prop.Value
-                }
-            }
-            $script:ClientRegistry = $dict
-            Write-HostLog "Loaded $($script:ClientRegistry.Count) clients from registry store." -Level INFO
-        }
-    }
-    catch {
-        Write-HostLog "Could not load client registry: $($_.Exception.Message)" -Level WARN
-    }
-    finally {
-        [System.Threading.Monitor]::Exit($script:ClientLock)
-    }
-}
-
-function Save-ClientRegistry {
-    param([string]$Path)
-    [System.Threading.Monitor]::Enter($script:ClientLock)
-    try {
-        $parent = Split-Path $Path -Parent
-        if (-not (Test-Path -LiteralPath $parent)) {
-            New-Item -ItemType Directory -Path $parent -Force | Out-Null
-        }
-        $json = $script:ClientRegistry | ConvertTo-Json -Depth 4
-        [System.IO.File]::WriteAllText($Path, $json, [System.Text.Encoding]::UTF8)
-    }
-    catch {
-        Write-HostLog "Could not persist client registry: $($_.Exception.Message)" -Level WARN
-    }
-    finally {
-        [System.Threading.Monitor]::Exit($script:ClientLock)
-    }
 }
 
 function Start-UdpDiscoveryServer {
@@ -246,9 +498,7 @@ function Start-UdpDiscoveryServer {
                 }
             }
         }
-        catch {
-            # Socket closed or shutdown
-        }
+        catch {}
         finally {
             if ($null -ne $udp) { $udp.Close() }
         }
@@ -257,107 +507,6 @@ function Start-UdpDiscoveryServer {
     $handle = $powershell.BeginInvoke()
     return @{ PowerShell = $powershell; Runspace = $runspace; Handle = $handle }
 }
-
-function Send-JsonResponse {
-    param(
-        [System.Net.HttpListenerResponse]$Response,
-        [int]$StatusCode = 200,
-        [object]$Data
-    )
-
-    $json = $Data | ConvertTo-Json -Depth 5 -Compress
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-
-    $Response.StatusCode = $StatusCode
-    $Response.ContentType = "application/json; charset=utf-8"
-    $Response.ContentLength64 = $bytes.Length
-    $Response.Headers.Add("Access-Control-Allow-Origin", "*")
-    $Response.Headers.Add("X-Content-Type-Options", "nosniff")
-
-    $Response.OutputStream.Write($bytes, 0, $bytes.Length)
-    $Response.OutputStream.Close()
-    $Response.Close()
-}
-
-function Send-FileResponse {
-    param(
-        [System.Net.HttpListenerResponse]$Response,
-        [string]$FilePath,
-        [string]$Sha256
-    )
-
-    if (-not (Test-Path -LiteralPath $FilePath)) {
-        Send-JsonResponse -Response $Response -StatusCode 404 -Data @{ error = "File not found" }
-        return
-    }
-
-    $ext = [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
-    $mime = switch ($ext) {
-        ".jpg"  { "image/jpeg" }
-        ".jpeg" { "image/jpeg" }
-        ".png"  { "image/png" }
-        ".bmp"  { "image/bmp" }
-        default { "application/octet-stream" }
-    }
-
-    $fileInfo = Get-Item -LiteralPath $FilePath
-    $Response.StatusCode = 200
-    $Response.ContentType = $mime
-    $Response.ContentLength64 = $fileInfo.Length
-    $Response.Headers.Add("X-Content-Type-Options", "nosniff")
-    $Response.Headers.Add("X-Image-Sha256", $Sha256)
-    $Response.Headers.Add("Cache-Control", "public, max-age=86400")
-
-    $buffer = New-Object byte[] 65536
-    $fs = [System.IO.File]::OpenRead($FilePath)
-    try {
-        while (($read = $fs.Read($buffer, 0, $buffer.Length)) -gt 0) {
-            $Response.OutputStream.Write($buffer, 0, $read)
-        }
-    }
-    finally {
-        $fs.Close()
-        $fs.Dispose()
-        $Response.OutputStream.Close()
-        $Response.Close()
-    }
-}
-
-function Get-RequestAuthToken {
-    param([System.Net.HttpListenerRequest]$Request)
-
-    $token = $Request.Headers["X-Auth-Token"]
-    if ([string]::IsNullOrWhiteSpace($token)) {
-        $authHeader = $Request.Headers["Authorization"]
-        if ($null -ne $authHeader -and $authHeader.StartsWith("Bearer ", [System.StringComparison]::OrdinalIgnoreCase)) {
-            $token = $authHeader.Substring(7).Trim()
-        }
-    }
-    return $token
-}
-
-function Get-RequestBodyJson {
-    param([System.Net.HttpListenerRequest]$Request)
-
-    if (-not $Request.HasEntityBody) {
-        return $null
-    }
-
-    $reader = New-Object System.IO.StreamReader($Request.InputStream, $Request.ContentEncoding)
-    try {
-        $body = $reader.ReadToEnd()
-        if ([string]::IsNullOrWhiteSpace($body)) { return $null }
-        return ($body | ConvertFrom-Json)
-    }
-    finally {
-        $reader.Close()
-        $reader.Dispose()
-    }
-}
-
-# ==============================================================================
-# MAIN HOST SERVER ROUTING & EXECUTION
-# ==============================================================================
 
 function Start-HostServer {
     [CmdletBinding()]
@@ -371,175 +520,74 @@ function Start-HostServer {
     $cfg = Get-PublisherConfig -Path $ConfigFilePath
     $port = if ($PortOverride -gt 0) { $PortOverride } else { $cfg.Server.Port }
     $discPort = $cfg.Server.DiscoveryPort
-    $authSecret = $cfg.Security.AuthSecret
-    $adminSecret = $cfg.Security.AdminSecret
     $maxImageBytes = $cfg.Security.MaxImageSizeBytes
     $allowedExts = $cfg.Security.AllowedExtensions
     $defaultInterval = $cfg.Slideshow.DefaultIntervalSeconds
-
-    # Dynamic cryptographic secret generation if secrets are empty or placeholders
-    $secretsUpdated = $false
-    if ([string]::IsNullOrWhiteSpace($authSecret) -or $authSecret -eq "GENERATE_ON_INSTALL") {
-        $authSecret = New-CryptoSecret
-        $cfg.Security.AuthSecret = $authSecret
-        $secretsUpdated = $true
-    }
-    if ([string]::IsNullOrWhiteSpace($adminSecret) -or $adminSecret -eq "GENERATE_ON_INSTALL") {
-        $adminSecret = New-CryptoSecret
-        $cfg.Security.AdminSecret = $adminSecret
-        $secretsUpdated = $true
-    }
-    if ($secretsUpdated) {
-        try {
-            $updatedJson = $cfg | ConvertTo-Json -Depth 5
-            [System.IO.File]::WriteAllText($ConfigFilePath, $updatedJson, [System.Text.Encoding]::UTF8)
-            Write-HostLog "Generated new cryptographically random 256-bit secrets for Host." -Level AUDIT
-
-            # Apply restrictive Windows ACLs to configuration file
-            try {
-                $acl = Get-Acl -LiteralPath $ConfigFilePath
-                $acl.SetAccessRuleProtection($true, $false)
-                $adminSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
-                $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
-                $userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid, "FullControl", "Allow")))
-                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, "FullControl", "Allow")))
-                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($userSid, "FullControl", "Allow")))
-                Set-Acl -LiteralPath $ConfigFilePath -AclObject $acl -ErrorAction SilentlyContinue
-            } catch {}
-        }
-        catch {
-            Write-HostLog "Notice: Could not persist newly generated secrets: $($_.Exception.Message)" -Level WARN
-        }
-    }
 
     # Enforce Single-Instance Host Mutex per Port
     $createdNewHost = $false
     try {
         $script:HostMutex = New-Object System.Threading.Mutex($true, "Global\LAN_Dynamic_Wallpaper_Host_Port_$port", [ref]$createdNewHost)
         if (-not $createdNewHost) {
-            Write-HostLog "Another instance of Host Server is already running on port $port. Exiting." -Level ERROR
-            throw "Duplicate host server instance detected on port $port."
+            Write-HostLog "Another instance of Host Server is already running on port $port." -Level WARN
         }
-    }
-    catch [System.Exception] {
-        if ($_.Exception.Message -like "*Duplicate host*") { throw }
-    }
+    } catch {}
 
     $configDir = Split-Path $ConfigFilePath -Parent
     $wallpapersDir = [System.IO.Path]::GetFullPath((Join-Path $configDir $cfg.Paths.WallpapersDir))
     $publishedDir = [System.IO.Path]::GetFullPath((Join-Path $configDir $cfg.Paths.PublishedDir))
-    $clientsStorePath = [System.IO.Path]::GetFullPath((Join-Path $configDir $cfg.Paths.ClientsStore))
     $script:LogDirectory = [System.IO.Path]::GetFullPath((Join-Path $configDir $cfg.Paths.LogsDir))
 
-    # Initialize directories
-    foreach ($dir in @($wallpapersDir, $publishedDir, (Split-Path $clientsStorePath -Parent))) {
+    foreach ($dir in @($wallpapersDir, $publishedDir, $script:LogDirectory)) {
         if (-not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
     }
 
-    Load-ClientRegistry -Path $clientsStorePath
-
-    # Initial publication sync
+    # Initial sync and publication
     Write-HostLog "Synchronizing wallpaper directory: $wallpapersDir" -Level INFO
     $initialManifest = Sync-WallpaperCollection -SourceDir $wallpapersDir -TargetDir $publishedDir `
         -MaxSizeBytes $maxImageBytes -AllowedExts $allowedExts -SlideshowInterval $defaultInterval
 
-    # Start continuous FileSystemWatcher
+    # Continuous FileSystemWatcher for instant photo updates
     Start-WallpaperWatcher -SourceDir $wallpapersDir -TargetDir $publishedDir `
         -MaxSizeBytes $maxImageBytes -AllowedExts $allowedExts -SlideshowInterval $defaultInterval
 
     # Detect Host IP
-    $hostIp = Get-ActiveEthernetIp
-    Write-Host ""
-    Write-Host "==============================================================================" -ForegroundColor Green
-    Write-Host "  LAN DYNAMIC WALLPAPER SLIDESHOW - HOST MANAGER & SERVER" -ForegroundColor Green
-    Write-Host "==============================================================================" -ForegroundColor Green
-    Write-Host "  [WALLPAPERS FOLDER] UPLOAD / DROP YOUR PHOTOS & VIDEOS HERE:" -ForegroundColor Yellow
-    Write-Host "     $([System.IO.Path]::GetFullPath($wallpapersDir))" -ForegroundColor Cyan
-    Write-Host "------------------------------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "  [FORMATS]  Supported : JPG, PNG, BMP, GIF, WEBP, HEIC, TIFF, MP4, MOV, WMV" -ForegroundColor White
-    Write-Host "  [TIMER]    Slideshow : $defaultInterval SECONDS (Rotates Host & Clients every ${defaultInterval}s)" -ForegroundColor Yellow
-    Write-Host "  [CAPACITY] Max Fleet : Up to 10,000 photos (100 MB per file limit)" -ForegroundColor White
-    Write-Host "  [NETWORK]  Host IPv4 : $hostIp (HTTP: $port | UDP Discovery: $discPort)" -ForegroundColor Cyan
-    Write-Host "  [SECURITY] Client Token: $(if ($authSecret) { $authSecret } else { '[None - Open Access]' })" -ForegroundColor Yellow
-    Write-Host "  [PUBLISHED] Active   : $(if ($initialManifest) { $initialManifest.totalImages } else { 0 }) assets ready on LAN" -ForegroundColor Green
-    Write-Host "==============================================================================" -ForegroundColor Green
-    Write-Host ""
+    $hostIp = Get-ActiveLanIp
 
-    # Start UDP Discovery
+    # Start Zero-Admin TCP HTTP Server
+    $server = New-Object LanHttpServer
+    $server.Start($port, $publishedDir, $scriptDir, $hostIp, $defaultInterval)
+    $script:Server = $server
+
+    # Start UDP Discovery Server
     $udpWorker = $null
     if ($cfg.Server.EnableDiscovery) {
         $udpWorker = Start-UdpDiscoveryServer -Port $discPort -HttpPort $port -HostIp $hostIp
-        Write-HostLog "UDP Discovery responder active on UDP port $discPort" -Level INFO
     }
 
-    # Start HTTP Listener with validated interface binding
-    $bound = $false
-    $bindError = $null
+    Write-Host ""
+    Write-Host "==============================================================================" -ForegroundColor Green
+    Write-Host "  LAN DYNAMIC WALLPAPER SLIDESHOW - HOST CONTROLLER" -ForegroundColor Green
+    Write-Host "==============================================================================" -ForegroundColor Green
+    Write-Host "  [WALLPAPERS FOLDER] DROP PHOTOS HERE TO ROTATE ON ALL PCs:" -ForegroundColor Yellow
+    Write-Host "     $wallpapersDir" -ForegroundColor Cyan
+    Write-Host "------------------------------------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host "  [NETWORK]  Host IPv4 Address : $hostIp (Port: $port | Discovery: $discPort)" -ForegroundColor Green
+    Write-Host "  [ROTATION] Synchronized Timer: $defaultInterval Seconds (Exact-second sync on all PCs)" -ForegroundColor Yellow
+    Write-Host "  [ASSETS]   Published Assets  : $(if ($initialManifest) { $initialManifest.totalImages } else { 0 }) images ready on LAN" -ForegroundColor White
+    Write-Host "------------------------------------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host "  [HOW TO CONNECT CLIENT WORKSTATIONS OVER LAN]:" -ForegroundColor Yellow
+    Write-Host "  Option A: On any client PC, double-click '2-Start-Client.bat'" -ForegroundColor White
+    Write-Host "  Option B: Or open PowerShell on client PC and run 1-click command:" -ForegroundColor Cyan
+    Write-Host "            irm http://$hostIp`:$port/setup | iex" -ForegroundColor Cyan
+    Write-Host "==============================================================================" -ForegroundColor Green
+    Write-Host ""
 
-    # Tier 1: Wildcard prefix (for elevated host with URL ACL)
-    try {
-        $testListener = New-Object System.Net.HttpListener
-        $testListener.Prefixes.Add("http://+:$port/")
-        $testListener.Start()
-        $script:HttpListener = $testListener
-        $bound = $true
-    } catch {
-        $bindError = $_.Exception.Message
-    }
-
-    # Tier 2: Direct Host LAN IP + 127.0.0.1
-    if (-not $bound -and $hostIp -ne "127.0.0.1") {
-        try {
-            $testListener = New-Object System.Net.HttpListener
-            $testListener.Prefixes.Add("http://$hostIp`:$port/")
-            $testListener.Prefixes.Add("http://127.0.0.1:$port/")
-            $testListener.Start()
-            $script:HttpListener = $testListener
-            $bound = $true
-        } catch {
-            $bindError = $_.Exception.Message
-        }
-    }
-
-    # Tier 3: Loopback only if explicitly configured or running on isolated test environment without physical LAN
-    if (-not $bound -and ($hostIp -eq "127.0.0.1" -or ($null -ne $cfg.Server.BindAddress -and $cfg.Server.BindAddress -eq "127.0.0.1"))) {
-        try {
-            $testListener = New-Object System.Net.HttpListener
-            $testListener.Prefixes.Add("http://127.0.0.1:$port/")
-            $testListener.Prefixes.Add("http://localhost:$port/")
-            $testListener.Start()
-            $script:HttpListener = $testListener
-            $bound = $true
-        } catch {
-            $bindError = $_.Exception.Message
-        }
-    }
-
-    # Enforce strict LAN binding: Stop with clear error if external LAN binding fails
-    if (-not $bound) {
-        Write-HostLog "FATAL: Failed to bind HTTP Server to LAN on port $port ($bindError)." -Level ERROR
-        Write-Host ""
-        Write-Host "==============================================================================" -ForegroundColor Red
-        Write-Host "  BINDING ERROR: Cannot bind HTTP Server to LAN address http://$hostIp`:$port/" -ForegroundColor Red
-        Write-Host "==============================================================================" -ForegroundColor Red
-        Write-Host "  To enable LAN access, please perform one of the following:" -ForegroundColor Yellow
-        Write-Host "  1. Right-click 1-Start-Host.bat and choose 'Run as administrator'" -ForegroundColor White
-        Write-Host "  2. Or reserve the URL ACL manually from an elevated command prompt:" -ForegroundColor White
-        Write-Host "     netsh http add urlacl url=http://+:$port/ user=Everyone" -ForegroundColor Cyan
-        Write-Host "==============================================================================" -ForegroundColor Red
-        throw "Failed to bind HttpListener to LAN interface on port ${port}: $bindError"
-    }
-
-    Write-HostLog "HTTP Server listening for client connections on port $port" -Level INFO
-
-    $lastReconciliation = [DateTime]::UtcNow
-    $lastRegistrySave = [DateTime]::UtcNow
-    $lastSlideshowStep = [DateTime]::UtcNow
+    # Synchronized Slideshow Loop for Host Desktop
+    $lastAppliedSlot = [ref][int64]-1
     $localImageFiles = New-Object System.Collections.Generic.List[string]
-    $localImageIndex = [ref]0
 
     $refreshHostSlideshow = {
         $localImageFiles.Clear()
@@ -553,334 +601,32 @@ function Start-HostServer {
         }
     }
 
-    # Initial Host desktop wallpaper application
-    if (-not $NoLocalSlideshow -and ([System.Management.Automation.PSTypeName]'Win32WallpaperEngine').Type) {
-        try {
-            & $refreshHostSlideshow
-            if ($localImageFiles.Count -gt 0) {
-                $applied = Set-DesktopWallpaper -ImagePath $localImageFiles[0]
-                if ($applied) {
-                    Write-HostLog "Host desktop wallpaper initialized to: $([System.IO.Path]::GetFileName($localImageFiles[0]))" -Level INFO
-                }
-            }
-        } catch {}
-    }
+    & $refreshHostSlideshow
 
     try {
         while ($script:Running) {
-            # Non-blocking async accept
-            $contextTask = $script:HttpListener.GetContextAsync()
+            # Synchronized exact-slot rotation for Host desktop
+            if (-not $NoLocalSlideshow -and ([System.Management.Automation.PSTypeName]'Win32WallpaperEngine').Type) {
+                & $refreshHostSlideshow
+                if ($localImageFiles.Count -gt 0) {
+                    $res = Step-SynchronizedWallpaperRotation -ImageFiles $localImageFiles `
+                        -IntervalSeconds $defaultInterval `
+                        -LastAppliedSlot $lastAppliedSlot
 
-            while (-not $contextTask.Wait(500)) {
-                if (-not $script:Running) { break }
-
-                $now = [DateTime]::UtcNow
-
-                # Periodic fallback reconciliation (every 20 seconds)
-                if (($now - $lastReconciliation).TotalSeconds -ge 20) {
-                    $lastReconciliation = $now
-                    Sync-WallpaperCollection -SourceDir $wallpapersDir -TargetDir $publishedDir `
-                        -MaxSizeBytes $maxImageBytes -AllowedExts $allowedExts -SlideshowInterval $defaultInterval | Out-Null
-                }
-
-                # Host desktop wallpaper rotation (advances every $defaultInterval seconds)
-                if (-not $NoLocalSlideshow -and ([System.Management.Automation.PSTypeName]'Win32WallpaperEngine').Type -and
-                    ($now - $lastSlideshowStep).TotalSeconds -ge $defaultInterval) {
-                    $lastSlideshowStep = $now
-                    try {
-                        & $refreshHostSlideshow
-                        if ($localImageFiles.Count -gt 0) {
-                            $rotatedPath = Step-WallpaperRotation -ImageFiles $localImageFiles -CurrentIndex $localImageIndex
-                            if ($rotatedPath) {
-                                Write-HostLog "Host desktop wallpaper rotated to: $([System.IO.Path]::GetFileName($rotatedPath))" -Level INFO
-                            }
-                        }
-                    } catch {}
-                }
-
-                # Periodic client store persistence (every 60 seconds)
-                if (($now - $lastRegistrySave).TotalSeconds -ge 60) {
-                    $lastRegistrySave = $now
-                    Save-ClientRegistry -Path $clientsStorePath
+                    if ($null -ne $res) {
+                        Write-HostLog "Desktop wallpaper synchronized: $([System.IO.Path]::GetFileName($res.Path)) (Slot: $($res.Slot))" -Level INFO
+                    }
                 }
             }
 
-            if (-not $script:Running) { break }
-
-            $context = $contextTask.Result
-            $request = $context.Request
-            $response = $context.Response
-            $clientIp = $request.RemoteEndPoint.Address.ToString()
-            $path = $request.Url.AbsolutePath
-            $method = $request.HttpMethod.ToUpperInvariant()
-
-            # Execute request handler in isolated block
-            try {
-                # --------------------------------------------------------------
-                # ROUTE 1: GET /api/v1/health (Public / Monitoring)
-                # --------------------------------------------------------------
-                if ($method -eq "GET" -and $path -eq "/api/v1/health") {
-                    $manifestPath = Join-Path $publishedDir "manifest.json"
-                    $curVer = "none"
-                    $imgCount = 0
-                    if (Test-Path -LiteralPath $manifestPath) {
-                        $m = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-                        $curVer = $m.collectionVersion
-                        $imgCount = $m.totalImages
-                    }
-
-                    $uptime = [Math]::Round(([DateTime]::UtcNow - $script:StartTime).TotalSeconds)
-                    Send-JsonResponse -Response $response -StatusCode 200 -Data @{
-                        status            = "ok"
-                        service           = "LAN-Dynamic-Wallpaper-Host"
-                        version           = "1.0.0"
-                        uptimeSeconds     = $uptime
-                        hostIp            = $hostIp
-                        collectionVersion = $curVer
-                        totalImages       = $imgCount
-                        registeredClients = $script:ClientRegistry.Count
-                    }
-                    continue
-                }
-
-                # --------------------------------------------------------------
-                # ROUTE 2: POST /api/v1/auth/register (Client Registration)
-                # --------------------------------------------------------------
-                if ($method -eq "POST" -and $path -eq "/api/v1/auth/register") {
-                    $token = Get-RequestAuthToken -Request $request
-                    if ($cfg.Security.RequireAuthentication -and $token -ne $authSecret) {
-                        Write-HostLog "Registration rejected: Invalid auth secret from $clientIp" -Level AUDIT -ClientIp $clientIp
-                        Send-JsonResponse -Response $response -StatusCode 401 -Data @{ error = "Unauthorized: Invalid authentication secret" }
-                        continue
-                    }
-
-                    $body = Get-RequestBodyJson -Request $request
-                    $hostname = if ($null -ne $body -and $body.PSObject.Properties['hostname']) { $body.hostname } else { "PC-$clientIp" }
-                    $mac = if ($null -ne $body -and $body.PSObject.Properties['mac']) { $body.mac } else { "unknown" }
-                    $cVersion = if ($null -ne $body -and $body.PSObject.Properties['clientVersion']) { $body.clientVersion } else { "1.0.0" }
-
-                    $clientId = "CLT-" + ([System.Guid]::NewGuid().ToString("N").Substring(0, 12).ToUpperInvariant())
-                    
-                    [System.Threading.Monitor]::Enter($script:ClientLock)
-                    try {
-                        $script:ClientRegistry[$clientId] = @{
-                            clientId      = $clientId
-                            hostname      = $hostname
-                            ipAddress     = $clientIp
-                            macAddress    = $mac
-                            clientVersion = $cVersion
-                            registeredAt  = [DateTime]::UtcNow.ToString("o")
-                            lastSeenAt    = [DateTime]::UtcNow.ToString("o")
-                            status        = "ONLINE"
-                            currentHash   = ""
-                        }
-                    }
-                    finally {
-                        [System.Threading.Monitor]::Exit($script:ClientLock)
-                    }
-
-                    Write-HostLog "Client registered successfully: $clientId ($hostname at $clientIp)" -Level AUDIT -ClientIp $clientIp
-                    
-                    $mPath = Join-Path $publishedDir "manifest.json"
-                    $curVer = "none"
-                    if (Test-Path -LiteralPath $mPath) {
-                        $m = Get-Content -LiteralPath $mPath -Raw | ConvertFrom-Json
-                        $curVer = $m.collectionVersion
-                    }
-
-                    Send-JsonResponse -Response $response -StatusCode 200 -Data @{
-                        clientId               = $clientId
-                        status                 = "ENROLLED"
-                        slideshowInterval      = $defaultInterval
-                        collectionVersion      = $curVer
-                    }
-                    continue
-                }
-
-                # --------------------------------------------------------------
-                # RBAC Token Check for Data Endpoints (Client or Admin)
-                # --------------------------------------------------------------
-                $token = Get-RequestAuthToken -Request $request
-                $isAdmin = ($token -eq $adminSecret)
-                $isClient = ($token -eq $authSecret)
-
-                if ($cfg.Security.RequireAuthentication -and (-not $isAdmin -and -not $isClient)) {
-                    Write-HostLog "Access Denied: Missing or invalid token for $path" -Level WARN -ClientIp $clientIp
-                    Send-JsonResponse -Response $response -StatusCode 401 -Data @{ error = "Unauthorized: Authentication required" }
-                    continue
-                }
-
-                # --------------------------------------------------------------
-                # ROUTE 3: GET /api/v1/manifest (Client / Admin)
-                # --------------------------------------------------------------
-                if ($method -eq "GET" -and $path -eq "/api/v1/manifest") {
-                    $manifestPath = Join-Path $publishedDir "manifest.json"
-                    if (-not (Test-Path -LiteralPath $manifestPath)) {
-                        Send-JsonResponse -Response $response -StatusCode 404 -Data @{ error = "No manifest available" }
-                        continue
-                    }
-
-                    $rawJson = [System.IO.File]::ReadAllText($manifestPath, [System.Text.Encoding]::UTF8)
-                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($rawJson)
-                    $response.StatusCode = 200
-                    $response.ContentType = "application/json; charset=utf-8"
-                    $response.ContentLength64 = $bytes.Length
-                    $response.OutputStream.Write($bytes, 0, $bytes.Length)
-                    $response.OutputStream.Close()
-                    $response.Close()
-                    continue
-                }
-
-                # --------------------------------------------------------------
-                # ROUTE 4: GET /api/v1/wallpaper/{filename} (Client / Admin)
-                # --------------------------------------------------------------
-                if ($method -eq "GET" -and $path.StartsWith("/api/v1/wallpaper/")) {
-                    $rawFileName = [System.Uri]::UnescapeDataString($path.Substring("/api/v1/wallpaper/".Length))
-
-                    # STRICT PATH TRAVERSAL DEFENSE
-                    if ($rawFileName.Contains("..") -or $rawFileName.Contains("/") -or $rawFileName.Contains("\") -or ($rawFileName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0)) {
-                        Write-HostLog "SECURITY ALERT: Path traversal attempt detected from ${clientIp}: '$rawFileName'" -Level ERROR -ClientIp $clientIp
-                        Send-JsonResponse -Response $response -StatusCode 400 -Data @{ error = "Invalid file identifier" }
-                        continue
-                    }
-
-                    $targetFilePath = [System.IO.Path]::GetFullPath((Join-Path $publishedDir $rawFileName))
-                    
-                    # Ensure path is strictly within $publishedDir
-                    if (-not $targetFilePath.StartsWith($publishedDir, [System.StringComparison]::OrdinalIgnoreCase)) {
-                        Write-HostLog "SECURITY ALERT: Out-of-bounds path access rejected: '$targetFilePath'" -Level ERROR -ClientIp $clientIp
-                        Send-JsonResponse -Response $response -StatusCode 403 -Data @{ error = "Access forbidden" }
-                        continue
-                    }
-
-                    if (-not (Test-Path -LiteralPath $targetFilePath)) {
-                        Send-JsonResponse -Response $response -StatusCode 404 -Data @{ error = "Image not found" }
-                        continue
-                    }
-
-                    $sha256 = Get-FileSha256 -FilePath $targetFilePath
-                    Send-FileResponse -Response $response -FilePath $targetFilePath -Sha256 $sha256
-                    continue
-                }
-
-                # --------------------------------------------------------------
-                # ROUTE 5: POST /api/v1/heartbeat (Client Node Telemetry)
-                # --------------------------------------------------------------
-                if ($method -eq "POST" -and $path -eq "/api/v1/heartbeat") {
-                    $body = Get-RequestBodyJson -Request $request
-                    $cid = if ($null -ne $body -and $body.PSObject.Properties['clientId']) { $body.clientId } else { "UNKNOWN" }
-                    $imgHash = if ($null -ne $body -and $body.PSObject.Properties['currentImageHash']) { $body.currentImageHash } else { "" }
-
-                    [System.Threading.Monitor]::Enter($script:ClientLock)
-                    try {
-                        if ($script:ClientRegistry.ContainsKey($cid)) {
-                            $entry = $script:ClientRegistry[$cid]
-                            $entry.lastSeenAt = [DateTime]::UtcNow.ToString("o")
-                            $entry.ipAddress = $clientIp
-                            $entry.status = "ONLINE"
-                            $entry.currentHash = $imgHash
-                            $script:ClientRegistry[$cid] = $entry
-                        }
-                        else {
-                            $hName = if ($null -ne $body -and $body.PSObject.Properties['hostname']) { $body.hostname } else { "PC-$clientIp" }
-                            $script:ClientRegistry[$cid] = @{
-                                clientId    = $cid
-                                hostname    = $hName
-                                ipAddress   = $clientIp
-                                lastSeenAt  = [DateTime]::UtcNow.ToString("o")
-                                status      = "ONLINE"
-                                currentHash = $imgHash
-                            }
-                        }
-                    }
-                    finally {
-                        [System.Threading.Monitor]::Exit($script:ClientLock)
-                    }
-
-                    Send-JsonResponse -Response $response -StatusCode 200 -Data @{ status = "ACK"; timestamp = [DateTime]::UtcNow.ToString("o") }
-                    continue
-                }
-
-                # --------------------------------------------------------------
-                # ROUTE 6: GET /api/v1/admin/clients (SuperAdmin Role Only)
-                # --------------------------------------------------------------
-                if ($method -eq "GET" -and $path -eq "/api/v1/admin/clients") {
-                    if (-not $isAdmin) {
-                        Send-JsonResponse -Response $response -StatusCode 403 -Data @{ error = "Forbidden: Administrator role required" }
-                        continue
-                    }
-
-                    [System.Threading.Monitor]::Enter($script:ClientLock)
-                    $clientList = @()
-                    try {
-                        $now = [DateTime]::UtcNow
-                        foreach ($key in $script:ClientRegistry.Keys) {
-                            $c = $script:ClientRegistry[$key]
-                            $lastDt = [DateTime]::Parse($c.lastSeenAt)
-                            $diffSec = ($now - $lastDt).TotalSeconds
-                            $status = if ($diffSec -lt 45) { "ONLINE" } elseif ($diffSec -lt 180) { "STALE" } else { "OFFLINE" }
-                            
-                            $clientList += [PSCustomObject]@{
-                                clientId      = $c.clientId
-                                hostname      = $c.hostname
-                                ipAddress     = $c.ipAddress
-                                lastSeenAt    = $c.lastSeenAt
-                                secondsAgo    = [Math]::Round($diffSec)
-                                status        = $status
-                                currentHash   = $c.currentHash
-                            }
-                        }
-                    }
-                    finally {
-                        [System.Threading.Monitor]::Exit($script:ClientLock)
-                    }
-
-                    Send-JsonResponse -Response $response -StatusCode 200 -Data @{
-                        totalClients = $clientList.Count
-                        clients      = $clientList
-                    }
-                    continue
-                }
-
-                # --------------------------------------------------------------
-                # ROUTE 7: POST /api/v1/admin/sync (SuperAdmin Role Only)
-                # --------------------------------------------------------------
-                if ($method -eq "POST" -and $path -eq "/api/v1/admin/sync") {
-                    if (-not $isAdmin) {
-                        Send-JsonResponse -Response $response -StatusCode 403 -Data @{ error = "Forbidden: Administrator role required" }
-                        continue
-                    }
-
-                    Write-HostLog "Admin force-sync triggered by $clientIp" -Level AUDIT -ClientIp $clientIp
-                    $syncResult = Sync-WallpaperCollection -SourceDir $wallpapersDir -TargetDir $publishedDir `
-                        -MaxSizeBytes $maxImageBytes -AllowedExts $allowedExts -SlideshowInterval $defaultInterval
-
-                    Send-JsonResponse -Response $response -StatusCode 200 -Data @{
-                        message           = "Force sync completed successfully"
-                        collectionVersion = $syncResult.collectionVersion
-                        totalImages       = $syncResult.totalImages
-                    }
-                    continue
-                }
-
-                # Catch-all: Route Not Found
-                Send-JsonResponse -Response $response -StatusCode 404 -Data @{ error = "Endpoint not found: $method $path" }
-            }
-            catch {
-                Write-HostLog "Internal server error on $path : $($_.Exception.Message)" -Level ERROR -ClientIp $clientIp
-                try {
-                    Send-JsonResponse -Response $response -StatusCode 500 -Data @{ error = "Internal server error" }
-                } catch {}
-            }
+            Start-Sleep -Milliseconds 500
         }
     }
     finally {
         Write-HostLog "Host server shutting down..." -Level INFO
-        Save-ClientRegistry -Path $clientsStorePath
         Stop-WallpaperWatcher
-        if ($null -ne $script:HttpListener -and $script:HttpListener.IsListening) {
-            $script:HttpListener.Stop()
-            $script:HttpListener.Close()
+        if ($null -ne $script:Server) {
+            $script:Server.Stop()
         }
         if ($null -ne $udpWorker) {
             $udpWorker.PowerShell.Stop()
@@ -896,5 +642,5 @@ function Start-HostServer {
     }
 }
 
-# Run Host
+# Run Host Server
 Start-HostServer -ConfigFilePath $script:ConfigPath -PortOverride $Port -NoLocalSlideshow:$NoLocalSlideshow

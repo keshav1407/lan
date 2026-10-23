@@ -63,6 +63,7 @@ $script:Running = $true
 $script:CurrentIndex = 0
 $script:LocalCollection = New-Object System.Collections.Generic.List[string]
 $script:CurrentWallpaperHash = ""
+$script:LastAppliedSlot = [ref][int64]-1
 $script:ConsecutiveFailures = 0
 $script:LogLock = New-Object System.Object
 
@@ -680,24 +681,8 @@ function Start-ClientAgent {
         }
     }
 
-    if ([string]::IsNullOrWhiteSpace($hostIp) -and [Environment]::UserInteractive -and -not $RunOnce) {
-        Write-Host ""
-        Write-Host "==============================================================================" -ForegroundColor Yellow
-        Write-Host "  [NOTICE] Host PC could not be detected automatically on your LAN." -ForegroundColor Yellow
-        Write-Host "  (This is common when Wi-Fi routers block UDP broadcast packets)." -ForegroundColor Gray
-        Write-Host "  Look at the green Host console window for its IP address (e.g. 192.168.1.15)." -ForegroundColor White
-        Write-Host "==============================================================================" -ForegroundColor Yellow
-        $userIp = Read-Host "  Enter Host PC IP address (or press Enter for offline mode)"
-        if (-not [string]::IsNullOrWhiteSpace($userIp)) {
-            $hostIp = $userIp.Trim().Replace("http://", "").Replace("https://", "").Replace(":8765", "").TrimEnd("/")
-            $cfg.Connection.HostAddress = $hostIp
-            Save-ClientConfig -Path $ConfigPath -ConfigObj $cfg
-            Write-ClientLog "Configured Host IP: $hostIp (saved to ClientConfig.json)" -Level INFO
-        }
-    }
-
     if ([string]::IsNullOrWhiteSpace($hostIp)) {
-        Write-ClientLog "Host IP is not configured and discovery did not locate a host. Retaining offline mode." -Level WARN
+        Write-ClientLog "Host IP not yet discovered. Starting automated background LAN monitoring..." -Level INFO
     }
 
     # Initialize local collection from cache
@@ -737,19 +722,17 @@ function Start-ClientAgent {
             $now = [DateTime]::UtcNow
 
             # ------------------------------------------------------------------
-            # 1. Slideshow Rotation Loop
+            # 1. Synchronized Wallpaper Slideshow Rotation Loop
             # ------------------------------------------------------------------
-            if (($now - $lastSlideshowTick).TotalSeconds -ge $slideshowInterval) {
-                $lastSlideshowTick = $now
-                if ($null -ne $script:LocalCollection -and $script:LocalCollection.Count -gt 0) {
-                    $nextImg = Step-WallpaperRotation -ImageFiles $script:LocalCollection -CurrentIndex ([ref]$script:CurrentIndex)
-                    if ($null -ne $nextImg) {
-                        $script:CurrentWallpaperHash = Get-FileSha256Checksum -FilePath $nextImg
-                        Write-ClientLog "Slideshow rotated: $(Split-Path $nextImg -Leaf) (Index: $($script:CurrentIndex + 1)/$($script:LocalCollection.Count))" -Level INFO
-                    }
-                }
-                else {
-                    Write-ClientLog "No cached wallpapers available to rotate." -Level DEBUG
+            if ($null -ne $script:LocalCollection -and $script:LocalCollection.Count -gt 0) {
+                $res = Step-SynchronizedWallpaperRotation -ImageFiles $script:LocalCollection `
+                    -IntervalSeconds $slideshowInterval `
+                    -LastAppliedSlot $script:LastAppliedSlot `
+                    -CurrentIndex ([ref]$script:CurrentIndex)
+
+                if ($null -ne $res) {
+                    $script:CurrentWallpaperHash = Get-FileSha256Checksum -FilePath $res.Path
+                    Write-ClientLog "Desktop wallpaper synchronized: $(Split-Path $res.Path -Leaf) (Slot: $($res.Slot) | Total: $($script:LocalCollection.Count))" -Level INFO
                 }
             }
 
