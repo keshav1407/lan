@@ -537,7 +537,21 @@ function Refresh-LocalCollectionList {
             $list.Add($f.FullName)
         }
     }
-    return $list
+    # Fallback to local Wallpapers folder if cache is currently empty
+    if ($list.Count -eq 0) {
+        $wallpapersFallback = Join-Path $CacheDir "../Wallpapers"
+        if (Test-Path -LiteralPath $wallpapersFallback) {
+            $wpFiles = Get-ChildItem -LiteralPath $wallpapersFallback -File |
+                Where-Object { $_.Extension.ToLowerInvariant() -in @(".jpg", ".jpeg", ".png", ".bmp") } |
+                Sort-Object -Property Name
+
+            foreach ($wf in $wpFiles) {
+                $list.Add($wf.FullName)
+            }
+        }
+    }
+
+    return ,$list
 }
 
 function Send-ClientHeartbeat {
@@ -660,10 +674,11 @@ function Start-ClientAgent {
 
     # Initialize local collection from cache
     $script:LocalCollection = Refresh-LocalCollectionList -CacheDir $cacheDir
-    Write-ClientLog "Initial cache loaded: $($script:LocalCollection.Count) valid images ready." -Level INFO
+    $collCount = if ($null -ne $script:LocalCollection) { $script:LocalCollection.Count } else { 0 }
+    Write-ClientLog "Initial cache loaded: $collCount valid images ready." -Level INFO
 
     # If cache has images, set initial wallpaper immediately
-    if ($script:LocalCollection.Count -gt 0) {
+    if ($null -ne $script:LocalCollection -and $script:LocalCollection.Count -gt 0) {
         $currentImg = Step-WallpaperRotation -ImageFiles $script:LocalCollection -CurrentIndex ([ref]$script:CurrentIndex)
         if ($null -ne $currentImg) {
             $script:CurrentWallpaperHash = Get-FileSha256Checksum -FilePath $currentImg
@@ -678,7 +693,7 @@ function Start-ClientAgent {
             Register-ClientNode -BaseUrl $baseUrl -AuthSecret $authSecret -ClientId $refId
             Sync-ClientCollection -BaseUrl $baseUrl -AuthSecret $authSecret -CacheDir $cacheDir -ClientId $refId | Out-Null
             $script:LocalCollection = Refresh-LocalCollectionList -CacheDir $cacheDir
-            if ($script:LocalCollection.Count -gt 0) {
+            if ($null -ne $script:LocalCollection -and $script:LocalCollection.Count -gt 0) {
                 Step-WallpaperRotation -ImageFiles $script:LocalCollection -CurrentIndex ([ref]$script:CurrentIndex) | Out-Null
             }
         }
@@ -698,7 +713,7 @@ function Start-ClientAgent {
             # ------------------------------------------------------------------
             if (($now - $lastSlideshowTick).TotalSeconds -ge $slideshowInterval) {
                 $lastSlideshowTick = $now
-                if ($script:LocalCollection.Count -gt 0) {
+                if ($null -ne $script:LocalCollection -and $script:LocalCollection.Count -gt 0) {
                     $nextImg = Step-WallpaperRotation -ImageFiles $script:LocalCollection -CurrentIndex ([ref]$script:CurrentIndex)
                     if ($null -ne $nextImg) {
                         $script:CurrentWallpaperHash = Get-FileSha256Checksum -FilePath $nextImg
