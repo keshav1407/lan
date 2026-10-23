@@ -10,6 +10,9 @@ param(
     [string]$ConfigPath = "",
 
     [Parameter(Mandatory = $false)]
+    [string]$HostAddress = "",
+
+    [Parameter(Mandatory = $false)]
     [switch]$RunOnce,
 
     [Parameter(Mandatory = $false)]
@@ -174,7 +177,7 @@ function Discover-HostOnLan {
         $txt = $sr.ReadToEnd()
         $sr.Close(); $resp.Close()
         $healthJson = $txt | ConvertFrom-Json
-        if ($healthJson -and $healthJson.service -eq "LAN-Dynamic-Wallpaper-Host") {
+        if ($healthJson -and ($healthJson.service -like "*LAN*WALLPAPER*HOST*" -or $healthJson.status -eq "ok")) {
             Write-ClientLog "Discovered Host Server on local PC at 127.0.0.1:8765" -Level INFO
             return [PSCustomObject]@{
                 service  = "LAN_WALLPAPER_HOST"
@@ -287,7 +290,7 @@ function Discover-HostOnLan {
                     $resp.Close()
 
                     $healthJson = $txt | ConvertFrom-Json
-                    if ($healthJson -and $healthJson.service -eq "LAN_WALLPAPER_HOST") {
+                    if ($healthJson -and ($healthJson.service -like "*LAN*WALLPAPER*HOST*" -or $healthJson.status -eq "ok")) {
                         Write-ClientLog "Discovered Host PC via subnet sweep at $rIp`:8765" -Level INFO
                         return [PSCustomObject]@{
                             service  = "LAN_WALLPAPER_HOST"
@@ -603,7 +606,8 @@ function Send-ClientHeartbeat {
 function Start-ClientAgent {
     [CmdletBinding()]
     param(
-        [string]$Path = $script:ConfigPath
+        [string]$Path = $script:ConfigPath,
+        [string]$HostAddressOverride = ""
     )
 
     $cfg = Get-ClientConfig -Path $Path
@@ -650,7 +654,15 @@ function Start-ClientAgent {
     } catch {}
 
     $clientId = $cfg.Security.ClientId
-    $hostIp = $cfg.Connection.HostAddress
+    $hostIp = if (-not [string]::IsNullOrWhiteSpace($HostAddressOverride)) {
+        $HostAddressOverride.Trim()
+    } else {
+        $cfg.Connection.HostAddress
+    }
+    if (-not [string]::IsNullOrWhiteSpace($HostAddressOverride) -and $hostIp -ne $cfg.Connection.HostAddress) {
+        $cfg.Connection.HostAddress = $hostIp
+        Save-ClientConfig -Path $Path -ConfigObj $cfg
+    }
     $hostPort = $cfg.Connection.HostPort
     $discPort = $cfg.Connection.DiscoveryPort
     $enableDisc = $cfg.Connection.EnableDiscovery
@@ -806,4 +818,4 @@ function Start-ClientAgent {
 }
 
 # Run Agent
-Start-ClientAgent -Path $script:ConfigPath
+Start-ClientAgent -Path $script:ConfigPath -HostAddressOverride $HostAddress

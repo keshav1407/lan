@@ -179,7 +179,7 @@ if (-not ([System.Management.Automation.PSTypeName]'LanHttpServer').Type) {
                             }
                             long uptime = (long)(DateTime.UtcNow - StartTime).TotalSeconds;
                             string json = string.Format(
-                                "{{\"status\":\"ok\",\"service\":\"LAN-Dynamic-Wallpaper-Host\",\"version\":\"1.0.0\",\"uptimeSeconds\":{0},\"hostIp\":\"{1}\",\"collectionVersion\":\"{2}\",\"totalImages\":{3},\"registeredClients\":{4}}}",
+                                "{{\"status\":\"ok\",\"service\":\"LAN_WALLPAPER_HOST\",\"altService\":\"LAN-Dynamic-Wallpaper-Host\",\"version\":\"1.0.0\",\"uptimeSeconds\":{0},\"hostIp\":\"{1}\",\"collectionVersion\":\"{2}\",\"totalImages\":{3},\"registeredClients\":{4}}}",
                                 uptime, HostIp, colVer, imgCount, Clients.Count
                             );
                             SendJsonResponse(stream, 200, json);
@@ -585,6 +585,11 @@ function Start-HostServer {
     Write-Host "==============================================================================" -ForegroundColor Green
     Write-Host ""
 
+    # Automatically ensure Wallpapers drop folder opens in Windows Explorer
+    if (Test-Path -LiteralPath $wallpapersDir) {
+        try { Start-Process explorer.exe -ArgumentList "`"$wallpapersDir`"" } catch {}
+    }
+
     # Synchronized Slideshow Loop for Host Desktop
     $lastAppliedSlot = [ref][int64]-1
     $localImageFiles = New-Object System.Collections.Generic.List[string]
@@ -593,7 +598,12 @@ function Start-HostServer {
         $localImageFiles.Clear()
         if (Test-Path -LiteralPath $publishedDir) {
             $pFiles = Get-ChildItem -LiteralPath $publishedDir -File |
-                Where-Object { $_.Name -ne "manifest.json" -and -not $_.Name.EndsWith(".pubtmp") -and -not $_.Name.EndsWith(".tmp") } |
+                Where-Object {
+                    $_.Name -ne "manifest.json" -and
+                    -not $_.Name.EndsWith(".pubtmp") -and
+                    -not $_.Name.EndsWith(".tmp") -and
+                    $_.Extension.ToLowerInvariant() -in @(".jpg", ".jpeg", ".jfif", ".pjpeg", ".png", ".bmp")
+                } |
                 Sort-Object Name
             foreach ($pf in $pFiles) {
                 $localImageFiles.Add($pf.FullName)

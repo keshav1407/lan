@@ -158,9 +158,9 @@ function Test-ValidImageBinary {
         }
 
         switch ($ext) {
-            { $_ -in @(".jpg", ".jpeg") } {
-                # JPEG magic bytes: FF D8 FF
-                if ($headerBytes[0] -eq 0xFF -and $headerBytes[1] -eq 0xD8 -and $headerBytes[2] -eq 0xFF) {
+            { $_ -in @(".jpg", ".jpeg", ".jfif", ".pjpeg") } {
+                # JPEG SOI marker: FF D8
+                if ($headerBytes[0] -eq 0xFF -and $headerBytes[1] -eq 0xD8) {
                     return @{ IsValid = $true; Reason = "Valid JPEG" }
                 }
                 return @{ IsValid = $false; Reason = "Invalid JPEG header bytes" }
@@ -346,7 +346,7 @@ function Sync-WallpaperCollection {
         [string]$SourceDir,
         [string]$TargetDir,
         [long]$MaxSizeBytes = 104857600,
-        [string[]]$AllowedExts = @(".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".heic", ".heif", ".tiff", ".tif", ".ico", ".mp4", ".mov", ".wmv", ".avi", ".mkv"),
+        [string[]]$AllowedExts = @(".jpg", ".jpeg", ".jfif", ".pjpeg", ".png", ".bmp", ".gif", ".webp", ".heic", ".heif", ".tiff", ".tif", ".ico", ".mp4", ".mov", ".wmv", ".avi", ".mkv"),
         [int]$SlideshowInterval = 5
     )
 
