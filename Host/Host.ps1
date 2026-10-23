@@ -607,15 +607,19 @@ function Start-HostServer {
         while ($script:Running) {
             # Synchronized exact-slot rotation for Host desktop
             if (-not $NoLocalSlideshow -and ([System.Management.Automation.PSTypeName]'Win32WallpaperEngine').Type) {
-                & $refreshHostSlideshow
-                if ($localImageFiles.Count -gt 0) {
-                    $res = Step-SynchronizedWallpaperRotation -ImageFiles $localImageFiles `
-                        -IntervalSeconds $defaultInterval `
-                        -LastAppliedSlot $lastAppliedSlot
+                try {
+                    & $refreshHostSlideshow
+                    if ($localImageFiles.Count -gt 0) {
+                        $res = Step-SynchronizedWallpaperRotation -ImageFiles $localImageFiles `
+                            -IntervalSeconds $defaultInterval `
+                            -LastAppliedSlot $lastAppliedSlot
 
-                    if ($null -ne $res) {
-                        Write-HostLog "Desktop wallpaper synchronized: $([System.IO.Path]::GetFileName($res.Path)) (Slot: $($res.Slot))" -Level INFO
+                        if ($null -ne $res) {
+                            Write-HostLog "Desktop wallpaper synchronized: $([System.IO.Path]::GetFileName($res.Path)) (Slot: $($res.Slot))" -Level INFO
+                        }
                     }
+                } catch {
+                    Write-HostLog "Desktop wallpaper warning: $($_.Exception.Message)" -Level WARN
                 }
             }
 

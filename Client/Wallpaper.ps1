@@ -183,7 +183,7 @@ function Step-SynchronizedWallpaperRotation {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [System.Collections.Generic.List[string]]$ImageFiles,
+        $ImageFiles,
 
         [Parameter(Mandatory = $false)]
         [int]$IntervalSeconds = 5,
@@ -192,10 +192,10 @@ function Step-SynchronizedWallpaperRotation {
         [double]$ClockOffsetSeconds = 0.0,
 
         [Parameter(Mandatory = $true)]
-        [ref]$LastAppliedSlot,
+        $LastAppliedSlot,
 
         [Parameter(Mandatory = $false)]
-        [ref]$CurrentIndex = $null
+        $CurrentIndex = $null
     )
 
     if ($null -eq $ImageFiles -or $ImageFiles.Count -eq 0) {
@@ -208,8 +208,10 @@ function Step-SynchronizedWallpaperRotation {
     $currentUnixSec = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + $ClockOffsetSeconds
     $currentSlot = [int64][Math]::Floor($currentUnixSec / $IntervalSeconds)
 
+    $slotVal = if ($LastAppliedSlot -is [System.Management.Automation.PSReference]) { $LastAppliedSlot.Value } else { [int64]$LastAppliedSlot }
+
     # If we already applied the wallpaper for this time slot, skip
-    if ($LastAppliedSlot.Value -eq $currentSlot) {
+    if ($slotVal -eq $currentSlot) {
         return $null
     }
 
@@ -217,7 +219,7 @@ function Step-SynchronizedWallpaperRotation {
     $targetIndex = [int]($currentSlot % $count)
     if ($targetIndex -lt 0) { $targetIndex = ($targetIndex + $count) % $count }
 
-    if ($null -ne $CurrentIndex) {
+    if ($null -ne $CurrentIndex -and ($CurrentIndex -is [System.Management.Automation.PSReference])) {
         $CurrentIndex.Value = $targetIndex
     }
 
@@ -225,7 +227,9 @@ function Step-SynchronizedWallpaperRotation {
     if (Test-Path -LiteralPath $selectedPath) {
         $applied = Set-DesktopWallpaper -ImagePath $selectedPath
         if ($applied) {
-            $LastAppliedSlot.Value = $currentSlot
+            if ($LastAppliedSlot -is [System.Management.Automation.PSReference]) {
+                $LastAppliedSlot.Value = $currentSlot
+            }
             return [PSCustomObject]@{
                 Path  = $selectedPath
                 Index = $targetIndex
